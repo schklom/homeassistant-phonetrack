@@ -9,16 +9,15 @@ import requests  # type: ignore[import]
 import voluptuous as vol  # type: ignore[import]
 from homeassistant.components.device_tracker import (  # type: ignore[import]
     PLATFORM_SCHEMA,
-    SourceType,
     SeeCallback,
 )
 from homeassistant.const import CONF_DEVICES  # type: ignore[import]
 from homeassistant.const import CONF_TOKEN, CONF_URL
 from homeassistant.core import HomeAssistant  # type: ignore[import]
-from homeassistant.helpers.event import track_time_interval  # type: ignore[import]
+from homeassistant.helpers.event import async_track_time_interval # type: ignore[import]
 from homeassistant.helpers.typing import ConfigType  # type: ignore[import]
 from homeassistant.helpers.typing import DiscoveryInfoType
-from homeassistant.util import Throttle, slugify  # type: ignore[import]
+from homeassistant.util import slugify  # type: ignore[import]
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -72,6 +71,7 @@ class PhoneTrackDeviceTracker:  # pylint: disable=too-few-public-methods
         see: SeeCallback,
     ) -> None:
         """Initialize the PhoneTrack tracking."""
+        _LOGGER.debug("Initialize the PhoneTrack tracking")
         self.hass = hass
         self.url = config[CONF_URL]
         self.token = config[CONF_TOKEN]
@@ -84,25 +84,52 @@ class PhoneTrackDeviceTracker:  # pylint: disable=too-few-public-methods
 
         self.update_interval = timedelta(minutes=self.update_time_minutes, seconds=self.update_time_seconds)
 
+        _LOGGER.debug("Setting up PhoneTrack with update interval: %s", self.update_interval)
+
         # Initial call to update information
         self._update_info()
 
         # Schedule the periodic update
-        track_time_interval(hass, self._update_info, self.update_interval)
+        self.hass.add_job(
+            async_track_time_interval,
+            self.hass,
+            self._async_update_wrapper,
+            self.update_interval
+        )
+
+    async def _async_update_wrapper(self, now=None):
+        """Wrapper to run blocking update in executor."""
+        await self.hass.async_add_executor_job(self._update_info)
 
     def _update_info(self, *_: Any, **__: Any) -> bool:
         """Update the device info."""
         _LOGGER.debug("Updating devices")
-        data = requests.get(
-            urllib.parse.urljoin(self.url, self.token),
-            timeout=30,
-        ).json()
-        data = data[self.token]
+        try:
+            data = requests.get(
+                urllib.parse.urljoin(self.url, self.token),
+                timeout=30,
+            ).json()
+            _LOGGER.debug("data gotten")
+            data = data[self.token]
+            _LOGGER.debug("data keys=%s", data.keys())
+        except requests.exceptions.RequestException as ex:
+            _LOGGER.error("Connection error while updating PhoneTrack: %s", ex)
+            return False
+        except ValueError as ex:
+            _LOGGER.error("Error parsing PhoneTrack JSON: %s", ex)
+            return False
+        except requests.exceptions.ReadTimeout as ex:
+            _LOGGER.error("Connection to server timed out after 30 seconds: %s", ex)
+            return False
+
         for device in self.devices:
+            _LOGGER.debug("Looping over devices: device=%s", device)
             if device not in data.keys():
                 _LOGGER.info("Device %s is not available.", device)
                 continue
+            _LOGGER.debug("Getting lat and lon")
             lat, lon = data[device]["lat"], data[device]["lon"]
+            _LOGGER.debug("lat=%s and lon=%s", lat, lon)
             accuracy = data[device]["accuracy"]
             battery = data[device]["batterylevel"]
             if (
@@ -118,9 +145,8 @@ class PhoneTrackDeviceTracker:  # pylint: disable=too-few-public-methods
             self.see(
                 dev_id=slugify(device),
                 gps=(lat, lon),
-                source_type=SourceType.GPS,
+                source_type="gps",
                 gps_accuracy=accuracy,
                 battery=battery,
             )
         return True
-
