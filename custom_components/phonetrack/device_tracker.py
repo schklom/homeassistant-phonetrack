@@ -150,3 +150,4 @@ class PhoneTrackDeviceTracker:  # pylint: disable=too-few-public-methods
                 battery=battery,
             )
         return True
+
